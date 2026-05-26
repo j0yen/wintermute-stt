@@ -11,6 +11,8 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 pub mod bus;
+pub mod engine;
+pub mod processor;
 
 use std::path::PathBuf;
 
