@@ -57,6 +57,7 @@ name = "wm-stt"
 path = "src/main.rs"
 
 [dependencies]
+agorabus = { path = "../agorabus" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

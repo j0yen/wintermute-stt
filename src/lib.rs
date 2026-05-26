@@ -1,12 +1,16 @@
 //! `wintermute-stt` — speech-to-text library that backs the `wm-stt` daemon.
 //!
-//! iter-2 surface: runtime [`SttConfig`] (with env-var loader), allowed
-//! model-name + confidence-threshold validation, and the [`SttError`]
-//! enum the daemon will raise from disk + bus paths in later iterations.
-//! The agorabus topic schema and the whisper.cpp engine land in
-//! subsequent iterations per `PRD-wintermute-stt.md` §2.
+//! iter-3 surface: runtime [`SttConfig`] (env loader + validation), the
+//! [`SttError`] enum, and the agorabus topic schema in [`bus`] — typed
+//! payloads for inbound `wm.audio.speech.{start,chunk,end}` +
+//! `wm.stt.reload_model`, outbound `wm.stt.{partial,final,uncertain,
+//! error,model_loaded}`, plus the [`bus::decode_request`] entry point.
+//! The live subscribe loop and whisper.cpp engine land in iter-4+ per
+//! `PRD-wintermute-stt.md` §2.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
+
+pub mod bus;
 
 use std::path::PathBuf;
 
