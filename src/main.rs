@@ -1,12 +1,12 @@
 //! `wm-stt` CLI entrypoint.
 //!
-//! iter-2 wires a clap dispatcher and `tracing` initialisation. The
-//! `start` subcommand resolves a [`SttConfig`] from env vars and prints
-//! it (debug-level) then exits 2 — the daemon loop, whisper.cpp
-//! inference, and the live agorabus subscriber land in iter-3+. The
-//! `reload-model` and `transcribe` subcommands are also stubs at exit
-//! code 2; they will become agorabus producers once iter-4 lands the
-//! bus schema.
+//! iter-5 wires `start` to the live daemon loop in
+//! [`wintermute_stt::daemon`]: resolve config from env + CLI overrides,
+//! build a [`StubEngine`]-backed processor, connect to agorabus,
+//! subscribe to `wm.audio.speech.` and `wm.stt.`, dispatch each event.
+//! `reload-model` and `transcribe` remain stubs at exit code 2; they
+//! will become single-shot agorabus producers in iter-6 once the daemon
+//! is the canonical wm.stt.* publisher.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use wintermute_stt::{
-    DEFAULT_MIC_SOCK, DEFAULT_MODELS_ROOT, SttConfig, validate_model_name,
+    DEFAULT_MIC_SOCK, DEFAULT_MODELS_ROOT, SttConfig, daemon, validate_model_name,
 };
 
 #[derive(Parser, Debug)]
@@ -89,8 +89,24 @@ fn run_start(models_root: &Path, mic_sock: &Path) -> ExitCode {
         return ExitCode::from(1);
     }
     info!(?cfg, "wm-stt start: config resolved");
-    warn!("wm-stt start: daemon loop deferred to iter-3");
-    ExitCode::from(2)
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            error!(error = %err, "wm-stt start: failed to build tokio runtime");
+            return ExitCode::from(1);
+        }
+    };
+    match rt.block_on(daemon::run(cfg)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            error!(error = %err, "wm-stt start: daemon exited with error");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run_reload_model(name: &str) -> ExitCode {

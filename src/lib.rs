@@ -11,6 +11,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 pub mod bus;
+pub mod daemon;
 pub mod engine;
 pub mod processor;
 
