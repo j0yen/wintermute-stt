@@ -1,0 +1,137 @@
+{
+  "schema": "autobuilder.intent_card.v1",
+  "intent_slug": "wintermute-stt",
+  "prd_source": "/home/jsy/wintermute/autobuilder/PRD-wintermute-stt.md",
+  "root_motivation": "wintermute hears a non-literate user; her speech must reliably become text fast enough that the conversation feels live and accurate enough that the brain rarely asks for a repeat. A long-running daemon (`wm-stt`) subscribes to `wm.audio.speech.*` events, runs whisper.cpp's `distil-small.en` over streamed PCM (the realistic CPU choice per plan-agent's correction of `large-v3-turbo`), emits partial transcripts every ~500 ms during active speech, finalizes with a confidence score, and falls through to `wm.stt.uncertain` when confidence is too low so the brain can ask 'sorry, could you say that again?' via wm-tts. Cloud fast-path to the Whisper API is opt-in, never blocks, and falls back to local on any error. Moonshine was cut — Rust bindings are immature; the cloud fast-path achieves the same goal more reliably.",
+  "user_persona": "Two programmatic consumers. Primary: `wm-audio` publishes `wm.audio.speech.*` events with VAD-bracketed PCM; `wm-stt` is the next link in the audio→brain chain. Secondary: `wm-dialog` consumes `wm.stt.final`/`wm.stt.uncertain` and routes to the brain. The non-literate end-user never invokes wm-stt; she experiences it only as 'wintermute hears me'. Ops may run `wm-stt --reload-model <name>` for hot swaps.",
+  "unfakeable_metric": {
+    "name": "acceptance_tests_passing",
+    "lower_is_better": false,
+    "harness_command": "cargo test --release --quiet -- --format=terse 2>&1 | awk '/test result:/ {gsub(\";\",\"\",$4); print $4}' | tail -1",
+    "target": 8
+  },
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "level": "MUST",
+      "description": "Warm `distil-small.en` transcription of a 5-second utterance completes in ≤2 s on this laptop's CPU.",
+      "test": "tests/acceptance_ac1.rs::warm_distil_small_under_2s — fixture-based: prerecorded 5 s PCM blob fed through transcribe() against a warm-loaded whisper.cpp context; assert elapsed_ms ≤ 2000. Real-model path #[ignore]'d unless WM_TEST_HEAVY=1; stub-transcriber path runs in CI."
+    },
+    {
+      "id": "AC2",
+      "level": "MUST",
+      "description": "`wm.stt.partial` events emit at ~500 ms cadence during active speech.",
+      "test": "tests/acceptance_ac2.rs::partials_at_500ms_cadence — drive the daemon with a fake speech.start + chunked PCM for 3 s; observe the partial event stream on a fake agorabus sink; assert N partials in [4, 7] with inter-event gaps within [400 ms, 700 ms]."
+    },
+    {
+      "id": "AC3",
+      "level": "MUST",
+      "description": "Confidence below 0.45 emits `wm.stt.uncertain` instead of `wm.stt.final`; threshold is configurable via `--confidence-threshold` and `WM_STT_CONFIDENCE_THRESHOLD`.",
+      "test": "tests/acceptance_ac3.rs::low_confidence_emits_uncertain — feed a synthetic transcribe result with confidence=0.30; assert exactly one wm.stt.uncertain event published, zero wm.stt.final. Threshold-config knob exercised in same test by overriding to 0.20 and re-running."
+    },
+    {
+      "id": "AC4",
+      "level": "SHOULD",
+      "description": "With `WM_CLOUD_STT_FASTPATH=true` and network up, end-to-end transcription round-trip ≤500 ms for a 5-second utterance.",
+      "test": "tests/acceptance_ac4.rs::cloud_fastpath_under_500ms — mock Whisper API server replies in 200 ms; assert end-to-end ≤500 ms; assert local path was cancelled. Real-cloud path #[ignore]'d."
+    },
+    {
+      "id": "AC5",
+      "level": "MUST",
+      "description": "Network drop during cloud fast-path falls back to local result without dropping the in-flight utterance (no double-firing of `wm.stt.final`).",
+      "test": "tests/acceptance_ac5.rs::cloud_drop_falls_back_local — mock Whisper API server returns 503 mid-stream; assert exactly one wm.stt.final, sourced from local; assert no wm.stt.error event."
+    },
+    {
+      "id": "AC6",
+      "level": "SHOULD",
+      "description": "`wm-stt --reload-model small.en` completes in <5 s without dropping `mic.sock` subscription.",
+      "test": "tests/acceptance_ac6.rs::reload_model_under_5s — start daemon with distil-small.en; send reload signal; assert new model loaded within 5 s, mic subscription continuous (no gap in chunk receipt counter)."
+    },
+    {
+      "id": "AC7",
+      "level": "MUST",
+      "description": "60-minute steady-state run shows RSS growth <50 MB (no leak).",
+      "test": "tests/acceptance_ac7.rs::sixty_min_rss_growth_under_50mb — #[ignore]'d by default; run via `cargo test --release -- --ignored ac7_`; measures RSS every 30 s for 60 min, asserts max - min < 50 MB."
+    },
+    {
+      "id": "AC8",
+      "level": "MUST",
+      "description": "Daemon recovers from `wm-audio` restart by re-subscribing to `mic.sock` within 5 s.",
+      "test": "tests/acceptance_ac8.rs::resubscribes_within_5s — start daemon with fake mic.sock; kill the sock listener; restart it; assert daemon re-subscribed (chunk receipts resume) within 5 s."
+    }
+  ],
+  "scope": [
+    "wm-stt daemon binary (Rust, tokio).",
+    "agorabus subscriber for wm.audio.speech.start/chunk/end events.",
+    "Mic socket consumer (mic.sock from wm-audio) for raw PCM.",
+    "whisper.cpp inference via whisper-rs with distil-small.en default model.",
+    "Partial transcript emission at ~500ms cadence during active speech.",
+    "Confidence-thresholded final/uncertain event split (default threshold 0.45).",
+    "Optional cloud fast-path (Whisper API) gated by WM_CLOUD_STT_FASTPATH; falls back to local on any error.",
+    "Hot model swap via --reload-model.",
+    "Steady-state memory hygiene (RSS growth <50 MB over 60 min)."
+  ],
+  "non_goals": [
+    "Multi-language detection — Fleet 3 if needed; v1 assumes English.",
+    "Custom vocabulary / hotword biasing for proper nouns — Fleet 3.",
+    "Speaker-conditioned STT — Fleet 3.",
+    "GPU inference paths (CUDA / Vulkan) — Fleet 2 follow-on.",
+    "Audio capture itself — wm-audio owns that surface; wm-stt only consumes.",
+    "Dialog-layer 'sorry, say again?' prompt — wm-dialog/brain handle it; wm-stt only emits the uncertain event."
+  ],
+  "hard_constraints": {
+    "rust_edition": "2024",
+    "target_kind": "cli",
+    "deny_unsafe": true,
+    "max_deps": null,
+    "msrv": "1.85",
+    "additional": {
+      "whisper_rs_c_dep_acknowledged": "whisper-rs bundles whisper.cpp; iter-1 stubs the transcribe call so the crate builds without the C toolchain. Iter-N adds the real binding once a model file is present and the C build is verified on this laptop.",
+      "no_rustup": "rustc 1.85 single-channel; no nightly steps allowed.",
+      "wintermute_repo_root": "/home/jsy/wintermute/wintermute-stt",
+      "commit_identity": "Joe Yen <jyen.tech@gmail.com>"
+    }
+  },
+  "five_whys_trace": [
+    {
+      "why": 1,
+      "q": "Why do we need a dedicated STT daemon instead of inline transcription?",
+      "a": "wm-audio runs continuous capture + VAD; transcription must amortize model warmup (>200 ms) and pipeline partials at 500 ms cadence. A long-running daemon keeps the model warm and lets the brain see partials while final is still computing — inline-per-utterance can't do that and would also block wm-audio's capture loop."
+    },
+    {
+      "why": 2,
+      "q": "Why distil-small.en as the default instead of large-v3-turbo or medium.en?",
+      "a": "Plan-agent corrected the original PRD's optimistic large-v3-turbo claim. distil-small.en hits ≤2 s warm transcription for a 5 s utterance on this CPU laptop; large-v3-turbo overshoots by 2-3×. medium.en is fine on 4-core+ but distil-small.en degrades more gracefully on slower CPUs, and the opt-up path via --reload-model is documented (open-question 7.1)."
+    },
+    {
+      "why": 3,
+      "q": "Why optional cloud fast-path instead of always-local or always-cloud?",
+      "a": "Always-local: sub-second latency on this CPU is impractical. Always-cloud: sends speech to OpenAI by default, which is a privacy violation for a non-literate user who can't read a consent dialog. Opt-in cloud + always-local-fallback gives both — fast when explicitly enabled, private by default, and never blocks if the network drops."
+    },
+    {
+      "why": 4,
+      "q": "Why confidence-thresholded uncertain events instead of always-emit-final with a confidence number?",
+      "a": "The brain treats final and uncertain differently (uncertain → ask for repeat via wm-tts). Pushing the routing decision down to wm-stt — which has the model's no_speech_prob — keeps the brain stateless about confidence calibration. Threshold is configurable so per-user calibration is possible later without touching the brain."
+    },
+    {
+      "why": 5,
+      "q": "Why a hot model swap instead of restart-to-change-model?",
+      "a": "wm-audio's mic.sock is a long-lived UDS subscription; reconnecting on every model swap would drop chunks at the boundary and break the chunk-counter invariant in AC8. Hot swap also lets ops smoke-test latency vs. accuracy trade-offs against live audio without rebooting the daemon and losing the warm whisper.cpp context."
+    }
+  ],
+  "ambiguities_resolved": [
+    {
+      "question": "PRD §7.1 — ship medium.en as default for 4-core+ CPUs?",
+      "resolution": "No. Single default (distil-small.en) with documented opt-up via --reload-model. Resolved in 5-Whys why=2."
+    },
+    {
+      "question": "PRD §7.2 — emit very-low-confidence early partials, or wait for stability?",
+      "resolution": "Emit early with confidence number attached; wm-dialog can ignore low-confidence partials. Helps with debugging and matches the 500 ms cadence AC2 strictly."
+    },
+    {
+      "question": "Is the whisper.cpp C dep buildable on this laptop right now?",
+      "resolution": "Unverified at iter-1 time. Iter-1 stubs the transcribe call; iter-N adds whisper-rs once a model file is present and the C build is verified. Recorded in hard_constraints.additional."
+    }
+  ],
+  "created_at": "2026-05-26T03:00:00Z"
+}
