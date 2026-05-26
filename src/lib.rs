@@ -14,6 +14,8 @@ pub mod bus;
 pub mod daemon;
 pub mod engine;
 pub mod processor;
+#[cfg(feature = "whisper")]
+pub mod whisper_engine;
 
 use std::path::PathBuf;
 

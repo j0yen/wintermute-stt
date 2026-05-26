@@ -56,10 +56,19 @@ panic = "abort"
 name = "wm-stt"
 path = "src/main.rs"
 
+[features]
+# Opt-in real engine: pulls whisper.cpp via `whisper-rs` (heavy native
+# build) plus base64 decoding for PCM payloads. The default build keeps
+# the daemon backed by `StubEngine` so development doesn't require the
+# whisper.cpp toolchain. Activation requires a `.bin` model under
+# `models_root` — see `src/whisper_engine.rs` for the path convention.
+whisper = ["dep:whisper-rs", "dep:base64"]
+
 [dependencies]
 agorabus = { path = "../agorabus" }
 anyhow = "1"
 async-trait = "0.1"
+base64 = { version = "0.22", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -67,6 +76,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+whisper-rs = { version = "0.13", optional = true, default-features = false }
 
 [dev-dependencies]
 proptest = "1"
