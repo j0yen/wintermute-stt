@@ -60,7 +60,26 @@ pub trait TranscriptionEngine: Send {
 
     /// Best-guess transcript so far without finalising. `None` before any
     /// chunk has been accepted in the current utterance.
+    ///
+    /// This is the "slow" partial path — engines may run full inference
+    /// over the accumulated audio. The daemon's in-band partial-cadence
+    /// emit calls [`Self::current_partial_fast`] instead so it can stay
+    /// off the heavy decoder when one exists.
     fn current_partial(&mut self) -> Option<String>;
+
+    /// Cheap-path partial used by the daemon's in-band emit on the
+    /// `partial_cadence_ms` tick.
+    ///
+    /// Contract: must complete in O(ms) so it cannot stall the daemon's
+    /// async runtime — the `SpeechEnd` path is already hoisted into
+    /// [`tokio::task::spawn_blocking`], but partials run in the calling
+    /// task. Default implementation falls through to
+    /// [`Self::current_partial`]; engines with a real heavy decoder
+    /// should override and either return `None` or run a cheap decode
+    /// (e.g. greedy on the latest window).
+    fn current_partial_fast(&mut self) -> Option<String> {
+        self.current_partial()
+    }
 
     /// Finalise the active utterance.
     ///
@@ -245,5 +264,61 @@ mod tests {
         let err = e.reload_model("tiny.en").expect_err("unknown rejected");
         assert!(matches!(err, EngineError::UnknownModel(SttError::UnknownModel { .. })));
         assert_eq!(e.model_name(), crate::DEFAULT_MODEL_NAME);
+    }
+
+    #[test]
+    fn stub_partial_fast_defaults_to_partial() {
+        let mut e = StubEngine::default_for_tests().unwrap();
+        assert!(e.current_partial_fast().is_none());
+        e.accept_chunk(0, "AAAA").unwrap();
+        assert_eq!(
+            e.current_partial_fast().as_deref(),
+            Some("[stub partial 1]"),
+        );
+    }
+
+    /// Engine that distinguishes the cheap path from the slow one — used
+    /// to verify that callers can override `current_partial_fast`
+    /// independently of `current_partial`.
+    struct SplitEngine {
+        model: String,
+        fast: Option<String>,
+        slow: Option<String>,
+    }
+
+    impl TranscriptionEngine for SplitEngine {
+        fn model_name(&self) -> &str {
+            &self.model
+        }
+        fn accept_chunk(&mut self, _seq: u64, _pcm_b64: &str) -> Result<(), EngineError> {
+            Ok(())
+        }
+        fn current_partial(&mut self) -> Option<String> {
+            self.slow.clone()
+        }
+        fn current_partial_fast(&mut self) -> Option<String> {
+            self.fast.clone()
+        }
+        fn finalise(&mut self, _duration_ms: u32) -> Result<EngineFinal, EngineError> {
+            Ok(EngineFinal {
+                text: String::new(),
+                confidence: 1.0,
+            })
+        }
+        fn reload_model(&mut self, _name: &str) -> Result<u64, EngineError> {
+            Ok(0)
+        }
+        fn reset(&mut self) {}
+    }
+
+    #[test]
+    fn fast_and_slow_partials_are_independent() {
+        let mut e = SplitEngine {
+            model: "distil-small.en".to_string(),
+            fast: Some("FAST".to_string()),
+            slow: Some("SLOW".to_string()),
+        };
+        assert_eq!(e.current_partial_fast().as_deref(), Some("FAST"));
+        assert_eq!(e.current_partial().as_deref(), Some("SLOW"));
     }
 }

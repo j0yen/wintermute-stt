@@ -156,7 +156,7 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
         }
 
         if chunk_ts.saturating_sub(last_partial_ts) >= self.partial_cadence_ms {
-            if let Some(text) = self.engine.current_partial() {
+            if let Some(text) = self.engine.current_partial_fast() {
                 out.push(Emit::Partial(PartialEvent {
                     text,
                     ts: chunk_ts,
@@ -542,5 +542,77 @@ mod tests {
             100,
         );
         assert!(matches!(r[0], Emit::Final(_)));
+    }
+
+    /// Engine that records which partial path was called. Lets the
+    /// processor test prove the cadence emit goes through the
+    /// `current_partial_fast` (cheap) path, not `current_partial`.
+    struct PartialPathSpy {
+        model: String,
+        fast_calls: std::cell::Cell<u32>,
+        slow_calls: std::cell::Cell<u32>,
+    }
+
+    impl crate::engine::TranscriptionEngine for PartialPathSpy {
+        fn model_name(&self) -> &str {
+            &self.model
+        }
+        fn accept_chunk(
+            &mut self,
+            _seq: u64,
+            _pcm_b64: &str,
+        ) -> Result<(), crate::engine::EngineError> {
+            Ok(())
+        }
+        fn current_partial(&mut self) -> Option<String> {
+            self.slow_calls.set(self.slow_calls.get() + 1);
+            Some("SLOW".to_string())
+        }
+        fn current_partial_fast(&mut self) -> Option<String> {
+            self.fast_calls.set(self.fast_calls.get() + 1);
+            Some("FAST".to_string())
+        }
+        fn finalise(
+            &mut self,
+            _duration_ms: u32,
+        ) -> Result<crate::engine::EngineFinal, crate::engine::EngineError> {
+            Ok(crate::engine::EngineFinal {
+                text: String::new(),
+                confidence: 1.0,
+            })
+        }
+        fn reload_model(&mut self, _name: &str) -> Result<u64, crate::engine::EngineError> {
+            Ok(0)
+        }
+        fn reset(&mut self) {}
+    }
+
+    #[test]
+    fn partial_cadence_uses_fast_path() {
+        let engine = PartialPathSpy {
+            model: "distil-small.en".to_string(),
+            fast_calls: std::cell::Cell::new(0),
+            slow_calls: std::cell::Cell::new(0),
+        };
+        let cfg = SttConfig {
+            confidence_threshold: 0.5,
+            ..SttConfig::default()
+        };
+        let mut p = UtteranceProcessor::new(engine, cfg).with_partial_cadence_ms(500);
+        p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
+        let r = p.handle(
+            Request::SpeechChunk(SpeechChunkEvent {
+                seq: 0,
+                pcm_b64: "AAAA".to_string(),
+                ts: 600,
+            }),
+            600,
+        );
+        match &r[0] {
+            Emit::Partial(pe) => assert_eq!(pe.text, "FAST"),
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        assert_eq!(p.engine.fast_calls.get(), 1);
+        assert_eq!(p.engine.slow_calls.get(), 0);
     }
 }
