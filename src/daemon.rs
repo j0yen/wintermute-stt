@@ -17,11 +17,10 @@
 //! [`crate::engine::TranscriptionEngine`] means only [`run`] needs to
 //! change to swap the engine.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::bus::{self, ErrorEvent, Request, decode_request, now_unix_ms, outgoing};
@@ -73,11 +72,11 @@ impl EventSink for AgoraSink {
 
 /// Live daemon state.
 ///
-/// Wraps a single [`UtteranceProcessor`] in a `tokio::sync::Mutex`
-/// because the processor mutates on `handle` and is contended by the
-/// dispatch loop. Iter-5 only ever has one inflight `dispatch` at a
-/// time — barge-in via concurrent requests lands in iter-7 when a
-/// separate task races partials.
+/// Wraps a single [`UtteranceProcessor`] in a `std::sync::Mutex`. The
+/// processor mutates on `handle` and is contended by the dispatch loop;
+/// since `handle` never `.await`s, a sync mutex is the right primitive
+/// and lets us drop the whole `handle` call onto the blocking pool when
+/// we need to (see [`dispatch`] for the `SpeechEnd` hoist).
 pub struct DaemonState<E: TranscriptionEngine + Send> {
     /// The state machine that decides which events to publish.
     pub processor: Mutex<UtteranceProcessor<E>>,
@@ -88,7 +87,7 @@ impl<E: TranscriptionEngine + Send> DaemonState<E> {
     #[must_use]
     pub const fn new(processor: UtteranceProcessor<E>) -> Self {
         Self {
-            processor: Mutex::const_new(processor),
+            processor: Mutex::new(processor),
         }
     }
 }
@@ -125,17 +124,32 @@ pub fn emit_to_value(emit: &Emit) -> Result<Value> {
 /// Dispatch one decoded request through the processor and publish
 /// every resulting emit.
 ///
+/// `SpeechEnd` runs on the tokio blocking pool: the underlying
+/// [`crate::engine::TranscriptionEngine::finalise`] is whisper.cpp
+/// inference and can hold a worker thread for seconds. All other
+/// requests are cheap (parse + state-machine transition) and run on
+/// the calling task.
+///
 /// # Errors
 /// Returns the first publish failure encountered while flushing the
-/// processor's emit stream. The outer loop logs and continues.
-pub async fn dispatch<E: TranscriptionEngine + Send>(
-    state: &DaemonState<E>,
+/// processor's emit stream, or a join error if the blocking task
+/// panics. The outer loop logs and continues.
+pub async fn dispatch<E: TranscriptionEngine + Send + 'static>(
+    state: &Arc<DaemonState<E>>,
     publish: &mut dyn EventSink,
     req: Request,
     now_ms: u64,
 ) -> Result<()> {
-    let emits = {
-        let mut p = state.processor.lock().await;
+    let emits: Vec<Emit> = if matches!(req, Request::SpeechEnd(_)) {
+        let state = Arc::clone(state);
+        tokio::task::spawn_blocking(move || {
+            let mut p = lock_processor_recovered(&state);
+            p.handle(req, now_ms)
+        })
+        .await
+        .context("wm-stt: spawn_blocking SpeechEnd panicked")?
+    } else {
+        let mut p = lock_processor_recovered(state);
         p.handle(req, now_ms)
     };
     for emit in emits {
@@ -144,6 +158,19 @@ pub async fn dispatch<E: TranscriptionEngine + Send>(
         publish.publish(topic, payload).await?;
     }
     Ok(())
+}
+
+/// Lock the processor mutex, recovering its guard if a prior holder
+/// panicked. Engine code is fallible-via-Result, so a real poison
+/// indicates a logic bug — log and continue rather than wedging the
+/// whole daemon.
+fn lock_processor_recovered<E: TranscriptionEngine + Send>(
+    state: &DaemonState<E>,
+) -> std::sync::MutexGuard<'_, UtteranceProcessor<E>> {
+    state.processor.lock().unwrap_or_else(|poisoned| {
+        warn!("wm-stt: processor mutex poisoned by prior panic; recovering");
+        poisoned.into_inner()
+    })
 }
 
 async fn publish_error(publish: &mut dyn EventSink, kind: &str, message: &str) -> Result<()> {
@@ -203,7 +230,7 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
         match decode_request(&ev.topic, &ev.data) {
             Ok(req) => {
                 let now = now_unix_ms();
-                if let Err(err) = dispatch(state.as_ref(), &mut sink, req, now).await {
+                if let Err(err) = dispatch(&state, &mut sink, req, now).await {
                     error!(topic = %ev.topic, err = %err, "wm-stt: dispatch failed");
                     let _ = publish_error(&mut sink, "bus", &format!("dispatch: {err}")).await;
                 }
@@ -261,7 +288,7 @@ mod tests {
         let state = fresh_state();
         let mut sink = MemSink::default();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::SpeechStart(SpeechStartEvent { ts: 100 }),
             100,
@@ -277,7 +304,7 @@ mod tests {
         let state = fresh_state();
         let mut sink = MemSink::default();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::SpeechStart(SpeechStartEvent { ts: 0 }),
             0,
@@ -285,7 +312,7 @@ mod tests {
         .await
         .unwrap();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 5000,
@@ -308,7 +335,7 @@ mod tests {
         let state = fresh_state();
         let mut sink = MemSink::default();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::SpeechChunk(SpeechChunkEvent {
                 seq: 0,
@@ -330,7 +357,7 @@ mod tests {
         let state = fresh_state();
         let mut sink = MemSink::default();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::ReloadModel(ReloadModelRequest {
                 model: "medium.en".to_string(),
@@ -351,7 +378,7 @@ mod tests {
         let state = fresh_state();
         let mut sink = MemSink::default();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::ReloadModel(ReloadModelRequest {
                 model: "tiny.en".to_string(),
@@ -378,7 +405,7 @@ mod tests {
         let state = Arc::new(DaemonState::new(p));
         let mut sink = MemSink::default();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::SpeechStart(SpeechStartEvent { ts: 0 }),
             0,
@@ -386,7 +413,7 @@ mod tests {
         .await
         .unwrap();
         dispatch(
-            state.as_ref(),
+            &state,
             &mut sink,
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 500,
