@@ -17,6 +17,7 @@
 //! [`crate::engine::TranscriptionEngine`] means only [`run`] needs to
 //! change to swap the engine.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -210,7 +211,12 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
     let processor = build_stub_processor(cfg)?;
     let state = Arc::new(DaemonState::new(processor));
 
-    let sock = agorabus::default_socket_path();
+    // `WM_STT_BUS_SOCKET` override mirrors `wm-tts`'s `WM_TTS_BUS_SOCKET`
+    // idiom and lets `tests/bus_smoke.rs` point the daemon at a per-test
+    // temp socket without touching $HOME.
+    let sock = std::env::var("WM_STT_BUS_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| agorabus::default_socket_path());
     let Some(mut sub_client) = agorabus::Client::try_connect(&sock).await? else {
         warn!(socket = %sock.display(), "wm-stt: agorabus not reachable; exiting");
         return Ok(());
