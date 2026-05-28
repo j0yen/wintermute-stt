@@ -215,6 +215,14 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
         warn!(socket = %sock.display(), "wm-stt: agorabus not reachable; exiting");
         return Ok(());
     };
+    sub_client
+        .announce(
+            &format!("wm-stt-{}-sub", std::process::id()),
+            std::process::id(),
+            "",
+            "wm-stt control subscribe",
+        )
+        .await?;
     sub_client.subscribe(bus::AUDIO_TOPIC_PREFIX).await?;
     sub_client.subscribe(bus::STT_COMMAND_PREFIX).await?;
     info!(
@@ -223,7 +231,15 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
         "wm-stt: subscribed"
     );
 
-    let pub_client = agorabus::Client::connect(&sock).await?;
+    let mut pub_client = agorabus::Client::connect(&sock).await?;
+    pub_client
+        .announce(
+            &format!("wm-stt-{}", std::process::id()),
+            std::process::id(),
+            "",
+            "wm-stt publish path",
+        )
+        .await?;
     let mut sink = AgoraSink { inner: pub_client };
 
     while let Some(ev) = sub_client.next_event().await? {
