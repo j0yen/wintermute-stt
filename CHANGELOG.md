@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.0 — 2026-05-30
+
+Wire `WhisperEngine` into the daemon (PRD-wintermute-stt-whisper-model).
+
+`daemon::run()` now selects the engine at compile time via a cfg gate:
+when built with `--features whisper` it constructs a real `WhisperEngine`
+(whisper.cpp via `whisper-rs`) backed by the model file at
+`<models_root>/whisper-<name>.bin`; the default build retains `StubEngine`
+so development without the whisper.cpp toolchain still compiles. The new
+`build_whisper_processor` helper (feature-gated) mirrors `build_stub_processor`.
+Also bumps the `agorabus` path-dep pin from `0.3` → `0.8` to match the
+installed workspace version.
+
 ## v0.1.1 — 2026-05-28
 
 Fix post-announce bus-startup defect (PRD-wintermute-fleet-bus-startup-defect).

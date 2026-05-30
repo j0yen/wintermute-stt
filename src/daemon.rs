@@ -12,10 +12,11 @@
 //! `Reply` lines with the broadcast stream — same pattern as
 //! `wintermute-tts/src/daemon.rs`).
 //!
-//! iter-5 ships the [`StubEngine`] in the production path. The
-//! `whisper-rs` engine binding lands in iter-6; the trait boundary at
-//! [`crate::engine::TranscriptionEngine`] means only [`run`] needs to
-//! change to swap the engine.
+//! iter-5 ships the [`StubEngine`] in the production path.
+//! iter-6 (PRD-wintermute-stt-whisper-model) wires the real
+//! `whisper-rs` engine when the `whisper` cargo feature is active; the
+//! trait boundary at [`crate::engine::TranscriptionEngine`] means only
+//! [`run`] needs to change to swap the engine.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,8 @@ use crate::bus::{self, ErrorEvent, Request, decode_request, now_unix_ms, outgoin
 use crate::engine::{StubEngine, TranscriptionEngine};
 use crate::processor::{Emit, UtteranceProcessor};
 use crate::SttConfig;
+#[cfg(feature = "whisper")]
+use crate::whisper_engine::WhisperEngine;
 
 /// Confidence value the iter-5 [`StubEngine`] reports for every
 /// finalised utterance.
@@ -209,25 +212,63 @@ pub fn build_stub_processor(cfg: SttConfig) -> Result<UtteranceProcessor<StubEng
     Ok(UtteranceProcessor::new(engine, cfg))
 }
 
+/// Build a real whisper-rs engine processor from a validated [`SttConfig`].
+///
+/// Only available when the `whisper` cargo feature is active. Loads the
+/// model binary from `cfg.models_root` (resolved as
+/// `<root>/whisper-<sanitised-name>.bin`). Fails with a descriptive
+/// [`anyhow::Error`] when the model file is missing or the whisper.cpp
+/// context cannot be created.
+///
+/// # Errors
+/// - [`crate::SttError`] from config validation.
+/// - [`crate::engine::EngineError`] from [`WhisperEngine::load`] when
+///   the model file is absent or corrupt.
+#[cfg(feature = "whisper")]
+pub fn build_whisper_processor(cfg: SttConfig) -> Result<UtteranceProcessor<WhisperEngine>> {
+    cfg.validate().context("wm-stt: config validation failed")?;
+    let engine = WhisperEngine::load(&cfg.model, &cfg.models_root)
+        .context("wm-stt: whisper engine load")?;
+    Ok(UtteranceProcessor::new(engine, cfg))
+}
+
 /// Run the live daemon: build the processor, connect to agorabus,
 /// subscribe to both inbound prefixes, dispatch each event until the
 /// bus closes.
+///
+/// When compiled with `--features whisper` (the production build) the
+/// daemon uses [`WhisperEngine`] and performs real inference on each
+/// finalised speech window. The default build (no features) falls back
+/// to [`StubEngine`] which emits a fixed-confidence placeholder —
+/// useful for development without the whisper.cpp toolchain.
 ///
 /// # Errors
 /// Propagates I/O failures from config validation or the agorabus
 /// client. A missing agorabus socket is *not* an error: the daemon
 /// logs and exits cleanly so the systemd unit restarts it when the bus
 /// comes back (same pattern as `wm-tts`).
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "daemon event loop; complexity is inherent to the subscribe+dispatch pattern"
+)]
 pub async fn run(cfg: SttConfig) -> Result<()> {
-    let processor = build_stub_processor(cfg)?;
-    let state = Arc::new(DaemonState::new(processor));
+    #[cfg(feature = "whisper")]
+    let state = {
+        let processor = build_whisper_processor(cfg)?;
+        Arc::new(DaemonState::new(processor))
+    };
+    #[cfg(not(feature = "whisper"))]
+    let state = {
+        let processor = build_stub_processor(cfg)?;
+        Arc::new(DaemonState::new(processor))
+    };
 
     // `WM_STT_BUS_SOCKET` override mirrors `wm-tts`'s `WM_TTS_BUS_SOCKET`
     // idiom and lets `tests/bus_smoke.rs` point the daemon at a per-test
     // temp socket without touching $HOME.
     let sock = std::env::var("WM_STT_BUS_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| agorabus::default_socket_path());
+        .map_or_else(|_| agorabus::default_socket_path(), PathBuf::from);
     let Some(mut sub_client) = agorabus::Client::try_connect(&sock).await? else {
         warn!(socket = %sock.display(), "wm-stt: agorabus not reachable; exiting");
         return Ok(());

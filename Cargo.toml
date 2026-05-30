@@ -1,6 +1,6 @@
 [package]
 name = "wintermute-stt"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -71,7 +71,7 @@ whisper = ["dep:whisper-rs", "dep:base64"]
 real-hardware = []
 
 [dependencies]
-agorabus = { path = "../agorabus", version = "0.3" }
+agorabus = { path = "../agorabus", version = "0.8" }
 anyhow = "1"
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
