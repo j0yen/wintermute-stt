@@ -42,7 +42,7 @@ in-flight transcription completes first; the new model warms up;
 |---|---|
 | `wm.stt.partial` | `{text, ts}` |
 | `wm.stt.final` | `{text, confidence, duration_ms, model, ts}` |
-| `wm.stt.uncertain` | `{text, confidence, ts}` (below threshold) |
+| `wm.stt.uncertain` | `{text, confidence, reason?, ts}` (below threshold, or `reason: "window_invalid"`) |
 | `wm.stt.error` | `{kind, message, ts}` |
 | `wm.stt.model_loaded` | `{model, warmup_ms, ts}` |
 
@@ -65,11 +65,11 @@ in-flight transcription completes first; the new model warms up;
 8. Daemon recovers from `wm-audio` restart by re-subscribing within
    5 s.
 
-Coverage: 53 lib unit tests + 1 acceptance template + 1 proptest, all
-green on `cargo test --release` (default features). The `whisper`
-feature requires cmake + the whisper.cpp toolchain and is exercised
-on hosts where the model `.bin` files are available under
-`/usr/share/wintermute/models/`.
+Coverage: 58 lib unit tests (default features), 67 with `--features whisper`,
++ 1 acceptance template + 1 proptest, all green on `cargo test --lib`.
+The `whisper` feature requires cmake + the whisper.cpp toolchain; build uses
+pre-shipped bindings (`WHISPER_DONT_GENERATE_BINDINGS=1` via `.cargo/config.toml`)
+so no additional clang headers are needed beyond what `whisper-rs-sys` bundles.
 
 ## Install
 
@@ -108,6 +108,24 @@ wm-stt start                                # uses defaults
 wm-stt start --models-root /usr/share/wintermute/models
 wm-stt reload-model medium.en               # hot-swap the model
 ```
+
+## Models
+
+`wm-stt` is designed to run entirely offline. Model files are NOT bundled in this
+repository. Download via `install.sh --download-model <name>`:
+
+| Model name       | Approx size | License    | Download URL (via HuggingFace) |
+|------------------|-------------|------------|-------------------------------|
+| `distil-small.en`| ~250 MB     | Apache 2.0 | `ggerganov/whisper.cpp` ggml-distil-small.en.bin |
+| `small.en`       | ~75 MB      | MIT        | `ggerganov/whisper.cpp` ggml-small.en-q5_1.bin |
+| `medium.en`      | ~500 MB     | MIT        | `ggerganov/whisper.cpp` ggml-medium.en-q5_0.bin |
+| `large-v3-turbo` | ~850 MB     | MIT        | `ggerganov/whisper.cpp` ggml-large-v3-turbo-q5_0.bin |
+
+The default model is `distil-small.en` (Apache 2.0,
+https://github.com/ggerganov/whisper.cpp — distil-whisper originally by
+[Hugging Face](https://huggingface.co/distil-whisper), also Apache 2.0).
+
+Model files are ignored by `.gitignore`; do not commit them.
 
 ## License
 

@@ -166,7 +166,9 @@ impl SttConfig {
     /// - `WM_STT_MODEL` (string; default `distil-small.en`)
     /// - `WM_STT_MODELS_ROOT` (path; default `/usr/share/wintermute/models`)
     /// - `WM_STT_MIC_SOCK` (path; default `/run/wintermute/mic.sock`)
-    /// - `WM_STT_THRESHOLD` (float; default `0.45`)
+    /// - `WM_STT_CONFIDENCE` (float; default `0.45`) — canonical threshold name
+    /// - `WM_STT_THRESHOLD` (float; alias for `WM_STT_CONFIDENCE` for backwards
+    ///   compatibility; overridden by `WM_STT_CONFIDENCE` when both are set)
     /// - `WM_CLOUD_STT_FASTPATH` (`true`/`false`; default `false`)
     ///
     /// # Errors
@@ -182,7 +184,10 @@ impl SttConfig {
         let mic_sock =
             env_string("WM_STT_MIC_SOCK").map_or_else(default_mic_sock, PathBuf::from);
 
-        let confidence_threshold = match env_string("WM_STT_THRESHOLD") {
+        // WM_STT_CONFIDENCE is the canonical name per PRD §2; WM_STT_THRESHOLD
+        // is the legacy alias.  Canonical takes precedence when both are set.
+        let threshold_raw = env_string("WM_STT_CONFIDENCE").or_else(|| env_string("WM_STT_THRESHOLD"));
+        let confidence_threshold = match threshold_raw {
             Some(raw) => parse_threshold_env(&raw)?,
             None => default_threshold(),
         };

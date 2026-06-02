@@ -116,13 +116,19 @@ pub struct FinalEvent {
     pub ts: u64,
 }
 
-/// Outbound `wm.stt.uncertain` payload (below confidence threshold).
+/// Outbound `wm.stt.uncertain` payload (below confidence threshold or invalid
+/// window).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UncertainEvent {
-    /// Low-confidence transcript.
+    /// Low-confidence transcript (empty string for window-validation rejects).
     pub text: String,
-    /// Confidence below the active threshold.
+    /// Confidence below the active threshold. Zero when `reason` is
+    /// `"window_invalid"` (no inference was run).
     pub confidence: f32,
+    /// Optional reason tag. `"window_invalid"` when the speech window was
+    /// outside the acceptable range; absent for normal low-confidence finals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Unix milliseconds at emission.
     pub ts: u64,
 }
@@ -292,6 +298,7 @@ mod tests {
         let u = UncertainEvent {
             text: "mumble".to_string(),
             confidence: 0.2,
+            reason: None,
             ts: 5,
         };
         let v = serde_json::to_value(&u).expect("serialises");

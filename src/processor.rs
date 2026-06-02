@@ -29,6 +29,14 @@ use crate::{SttConfig, validate_model_name};
 /// Partial-emit cadence in milliseconds. PRD §2.1.5 — "~500 ms".
 pub const DEFAULT_PARTIAL_CADENCE_MS: u64 = 500;
 
+/// Minimum speech window duration (ms) before we run inference.
+/// Windows shorter than this are likely false-positive wakes.
+pub const MIN_WINDOW_MS: u32 = 200;
+
+/// Maximum speech window duration (ms) before we skip inference.
+/// Windows longer than this indicate the end-of-speech detector is stuck.
+pub const MAX_WINDOW_MS: u32 = 30_000;
+
 /// Output of [`UtteranceProcessor::handle`]. The live loop publishes
 /// each variant on the matching `wm.stt.*` topic.
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +191,22 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
             }));
             return out;
         }
+        // Window validation: skip inference for invalid window lengths
+        // (< 200 ms is likely a false-positive; > 30 s is a stuck detector).
+        if !(MIN_WINDOW_MS..=MAX_WINDOW_MS).contains(&duration_ms) {
+            self.engine.reset();
+            self.state = State::Idle;
+            out.push(Emit::Uncertain(UncertainEvent {
+                text: String::new(),
+                confidence: 0.0,
+                reason: Some("window_invalid".to_string()),
+                ts: end_ts,
+            }));
+            if let Some(pending) = self.pending_reload.take() {
+                out.extend(self.apply_reload(&pending, now_ms));
+            }
+            return out;
+        }
         match self.engine.finalise(duration_ms) {
             Ok(f) => {
                 let model = self.engine.model_name().to_string();
@@ -198,6 +222,7 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
                     out.push(Emit::Uncertain(UncertainEvent {
                         text: f.text,
                         confidence: f.confidence,
+                        reason: None,
                         ts: end_ts,
                     }));
                 }
@@ -251,9 +276,16 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
 }
 
 fn engine_error_event(err: &EngineError, ts: u64) -> ErrorEvent {
+    engine_error_event_pub(err, ts)
+}
+
+/// Exposed for tests in sibling modules (`whisper_engine::tests`).
+#[doc(hidden)]
+pub(crate) fn engine_error_event_pub(err: &EngineError, ts: u64) -> ErrorEvent {
     let kind = match err {
         EngineError::BadChunk { .. } => "io",
         EngineError::UnknownModel(_) => "model",
+        EngineError::ModelMissing { .. } => "model_missing",
         EngineError::Internal(_) => "engine",
     };
     ErrorEvent {
@@ -534,12 +566,13 @@ mod tests {
     fn threshold_exact_equal_is_final() {
         let mut p = make(0.5, 0.5);
         p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
+        // Use MIN_WINDOW_MS (200 ms) so the window-validation gate passes.
         let r = p.handle(
             Request::SpeechEnd(SpeechEndEvent {
-                duration_ms: 100,
-                ts: 100,
+                duration_ms: MIN_WINDOW_MS,
+                ts: u64::from(MIN_WINDOW_MS),
             }),
-            100,
+            u64::from(MIN_WINDOW_MS),
         );
         assert!(matches!(r[0], Emit::Final(_)));
     }
@@ -614,5 +647,124 @@ mod tests {
         }
         assert_eq!(p.engine.fast_calls.get(), 1);
         assert_eq!(p.engine.slow_calls.get(), 0);
+    }
+
+    // --- AC5: window validation ---
+
+    /// Zero-duration window (speech.start immediately followed by speech.end
+    /// with duration_ms = 0) must publish `wm.stt.uncertain` with
+    /// `reason = "window_invalid"` and must not crash.
+    #[test]
+    fn empty_window_emits_uncertain_window_invalid() {
+        let mut p = make(0.45, 0.9);
+        p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
+        let r = p.handle(
+            Request::SpeechEnd(SpeechEndEvent {
+                duration_ms: 0,
+                ts: 0,
+            }),
+            0,
+        );
+        assert_eq!(r.len(), 1, "exactly one emit for zero-length window");
+        match &r[0] {
+            Emit::Uncertain(u) => {
+                assert_eq!(u.reason.as_deref(), Some("window_invalid"));
+                assert_eq!(u.confidence, 0.0);
+            }
+            other => panic!("expected window_invalid Uncertain, got {other:?}"),
+        }
+        assert!(p.is_idle(), "processor returns to idle after window_invalid");
+    }
+
+    /// Window just below MIN_WINDOW_MS threshold must be rejected.
+    #[test]
+    fn window_below_min_emits_uncertain_window_invalid() {
+        let mut p = make(0.45, 0.9);
+        p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
+        let r = p.handle(
+            Request::SpeechEnd(SpeechEndEvent {
+                duration_ms: MIN_WINDOW_MS - 1,
+                ts: 199,
+            }),
+            199,
+        );
+        assert_eq!(r.len(), 1);
+        match &r[0] {
+            Emit::Uncertain(u) => {
+                assert_eq!(u.reason.as_deref(), Some("window_invalid"));
+            }
+            other => panic!("expected window_invalid, got {other:?}"),
+        }
+    }
+
+    /// Window just above MAX_WINDOW_MS threshold must be rejected.
+    #[test]
+    fn window_above_max_emits_uncertain_window_invalid() {
+        let mut p = make(0.45, 0.9);
+        p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
+        let r = p.handle(
+            Request::SpeechEnd(SpeechEndEvent {
+                duration_ms: MAX_WINDOW_MS + 1,
+                ts: u64::from(MAX_WINDOW_MS) + 1,
+            }),
+            u64::from(MAX_WINDOW_MS) + 1,
+        );
+        assert_eq!(r.len(), 1);
+        match &r[0] {
+            Emit::Uncertain(u) => {
+                assert_eq!(u.reason.as_deref(), Some("window_invalid"));
+            }
+            other => panic!("expected window_invalid, got {other:?}"),
+        }
+    }
+
+    /// Valid window length at the boundary does NOT emit window_invalid.
+    #[test]
+    fn valid_window_at_min_boundary_is_not_rejected() {
+        let mut p = make(0.45, 0.9);
+        p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
+        let r = p.handle(
+            Request::SpeechEnd(SpeechEndEvent {
+                duration_ms: MIN_WINDOW_MS,
+                ts: u64::from(MIN_WINDOW_MS),
+            }),
+            u64::from(MIN_WINDOW_MS),
+        );
+        assert_eq!(r.len(), 1);
+        // Should be Final or Uncertain (confidence based), but NOT window_invalid.
+        match &r[0] {
+            Emit::Uncertain(u) => {
+                assert_ne!(u.reason.as_deref(), Some("window_invalid"),
+                    "min-boundary window must not be rejected as window_invalid");
+            }
+            Emit::Final(_) => {} // also acceptable
+            other => panic!("expected Final or Uncertain, got {other:?}"),
+        }
+    }
+
+    // --- AC9: confidence threshold ---
+
+    /// Normal uncertain (below threshold) has no reason field.
+    #[test]
+    fn low_confidence_uncertain_has_no_window_invalid_reason() {
+        let mut p = make(0.45, 0.2); // confidence 0.2 < threshold 0.45
+        p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
+        let r = p.handle(
+            Request::SpeechEnd(SpeechEndEvent {
+                duration_ms: MIN_WINDOW_MS,
+                ts: u64::from(MIN_WINDOW_MS),
+            }),
+            u64::from(MIN_WINDOW_MS),
+        );
+        match &r[0] {
+            Emit::Uncertain(u) => {
+                assert!(
+                    u.reason.is_none(),
+                    "low-confidence uncertain must not set reason"
+                );
+                assert_eq!(u.confidence, 0.2);
+            }
+            other => panic!("expected Uncertain, got {other:?}"),
+        }
     }
 }

@@ -8,6 +8,10 @@ targets = []
 version = 2
 yanked = "deny"
 unmaintained = "workspace"
+# whisper-rs 0.13 bundles whisper.cpp 1.7.1 via whisper-rs-sys which pulls in
+# cmake-based C/C++ dependencies. Any transitive "unmaintained" advisories
+# for those native deps should be added to `ignore` below with a comment.
+# Currently no known advisories require exceptions (2026-06-02).
 ignore = []
 
 [licenses]

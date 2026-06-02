@@ -32,6 +32,13 @@ pub enum EngineError {
     /// The active model is not on the allow-list.
     #[error(transparent)]
     UnknownModel(#[from] SttError),
+    /// Model file is absent or unreadable. Distinct from [`EngineError::Internal`]
+    /// so the daemon can publish `wm.stt.error` with `kind: "model_missing"`.
+    #[error("model file missing or unreadable: {path}")]
+    ModelMissing {
+        /// Path that was probed.
+        path: String,
+    },
     /// Engine internal failure (whisper.cpp init, decoder crash, …).
     #[error("engine internal failure: {0}")]
     Internal(String),

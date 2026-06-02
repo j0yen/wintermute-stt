@@ -1,6 +1,6 @@
 [package]
 name = "wintermute-stt"
-version = "0.1.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -64,8 +64,14 @@ path = "src/main.rs"
 # `models_root` — see `src/whisper_engine.rs` for the path convention.
 whisper = ["dep:whisper-rs", "dep:base64"]
 
+# Opt-in gate for hardware-bound acceptance tests (see README "Hardware
+# reality verification"). Off by default so `cargo test` stays green on
+# hosts without the whisper.cpp toolchain / a live `wm-audio` PCM source.
+# Per PRD-autobuilder-hardware-mock-convention AC10.
+real-hardware = []
+
 [dependencies]
-agorabus = { path = "../agorabus", version = "0.3" }
+agorabus = { path = "../agorabus", version = "0.8" }
 anyhow = "1"
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
