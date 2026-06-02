@@ -24,7 +24,7 @@ use base64::Engine as _;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::engine::{EngineError, EngineFinal, TranscriptionEngine};
-use crate::{SttError, validate_model_name};
+use crate::validate_model_name;
 
 /// Production whisper.cpp engine for `wm-stt`.
 ///
@@ -90,6 +90,14 @@ fn model_file_path(root: &Path, name: &str) -> PathBuf {
 }
 
 fn open_context(path: &Path) -> Result<WhisperContext, EngineError> {
+    // Fast path: check for file existence before invoking whisper.cpp so we
+    // can return `ModelMissing` (maps to `wm.stt.error { kind: "model_missing" }`)
+    // instead of a generic `Internal` error that masks the root cause.
+    if !path.exists() {
+        return Err(EngineError::ModelMissing {
+            path: path.display().to_string(),
+        });
+    }
     let params = WhisperContextParameters::default();
     let path_str = path.to_str().ok_or_else(|| {
         EngineError::Internal(format!("non-utf8 model path: {}", path.display()))
@@ -184,8 +192,11 @@ impl TranscriptionEngine for WhisperEngine {
             .full_n_segments()
             .map_err(|e| EngineError::Internal(format!("n_segments: {e}")))?;
         let mut text = String::new();
-        let mut no_speech_sum = 0.0_f32;
-        let mut counted = 0_i32;
+        // Confidence is the average per-token probability across all segments.
+        // whisper-rs 0.13 does not expose per-segment no_speech_prob; the
+        // token-level `full_get_token_prob` is the best available signal.
+        let mut token_prob_sum = 0.0_f32;
+        let mut token_count = 0_i32;
         for i in 0..n_segments {
             let seg_text = state
                 .full_get_segment_text(i)
@@ -194,19 +205,26 @@ impl TranscriptionEngine for WhisperEngine {
                 text.push(' ');
             }
             text.push_str(seg_text.trim());
-            let ns = state
-                .full_get_segment_no_speech_prob(i)
-                .map_err(|e| EngineError::Internal(format!("seg no_speech {i}: {e}")))?;
-            #[allow(clippy::float_arithmetic)]
-            {
-                no_speech_sum += ns;
+            let n_tokens = state
+                .full_n_tokens(i)
+                .map_err(|e| EngineError::Internal(format!("n_tokens seg {i}: {e}")))?;
+            for t in 0..n_tokens {
+                let p = state
+                    .full_get_token_prob(i, t)
+                    .map_err(|e| EngineError::Internal(format!("token_prob {i}/{t}: {e}")))?;
+                #[allow(clippy::float_arithmetic)]
+                {
+                    token_prob_sum += p;
+                }
+                token_count = token_count.saturating_add(1);
             }
-            counted = counted.saturating_add(1);
         }
-        let confidence = if counted > 0 {
-            #[allow(clippy::float_arithmetic, clippy::as_conversions)]
-            let avg = no_speech_sum / counted as f32;
-            1.0 - avg.clamp(0.0, 1.0)
+        let confidence = if token_count > 0 {
+            // token_count is i32; as f32 loses precision for very long utterances
+            // (> 16 M tokens) — acceptable for a confidence average.
+            #[allow(clippy::float_arithmetic, clippy::as_conversions, clippy::cast_precision_loss)]
+            let avg = token_prob_sum / token_count as f32;
+            avg.clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -263,6 +281,7 @@ pub fn resolve_model_path(root: &Path, name: &str) -> PathBuf {
 )]
 mod tests {
     use super::*;
+    use crate::SttError;
 
     #[test]
     fn resolve_model_path_sanitises_dots() {
@@ -329,5 +348,42 @@ mod tests {
             }
             other => panic!("expected UnknownModel, got {other:?}"),
         }
+    }
+
+    /// AC6 — missing model file produces [`EngineError::ModelMissing`].
+    ///
+    /// `WhisperEngine::load` with a valid model name but a path that does
+    /// not exist must return `ModelMissing` rather than a generic
+    /// `Internal` error. This lets the daemon publish
+    /// `wm.stt.error { kind: "model_missing" }` on the first speech.end
+    /// instead of an opaque internal failure.
+    #[test]
+    fn load_missing_model_file_returns_model_missing() {
+        let err = WhisperEngine::load("distil-small.en", "/nonexistent_root")
+            .expect_err("missing model file rejected");
+        match err {
+            EngineError::ModelMissing { path } => {
+                assert!(
+                    path.contains("whisper-distil-small-en.bin"),
+                    "path should reference the resolved model filename, got: {path}"
+                );
+            }
+            other => panic!("expected ModelMissing, got {other:?}"),
+        }
+    }
+
+    /// The `ModelMissing` variant maps to `"model_missing"` kind in error events.
+    #[test]
+    fn model_missing_kind_in_error_event() {
+        use crate::processor;
+        use crate::bus::ErrorEvent;
+
+        let err = EngineError::ModelMissing {
+            path: "/usr/share/wintermute/models/whisper-distil-small-en.bin".to_string(),
+        };
+        // Call the private helper via the crate-internal path (module is accessible in tests).
+        let ev: ErrorEvent = processor::engine_error_event_pub(&err, 42);
+        assert_eq!(ev.kind, "model_missing");
+        assert_eq!(ev.ts, 42);
     }
 }

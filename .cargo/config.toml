@@ -1,0 +1,10 @@
+# .cargo/config.toml — per-project Cargo configuration.
+#
+# WHISPER_DONT_GENERATE_BINDINGS: instruct whisper-rs-sys to use the
+# pre-shipped src/bindings.rs rather than running bindgen at build time.
+# The bundled bindings were generated against whisper.cpp 1.7.1 and are
+# the only bindings whisper-rs 0.13 compiles cleanly with on this host.
+# Without this flag, bindgen regenerates from the bundled header and
+# produces a struct layout that whisper-rs 0.13 was not written against.
+[env]
+WHISPER_DONT_GENERATE_BINDINGS = "1"

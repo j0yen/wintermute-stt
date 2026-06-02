@@ -594,6 +594,7 @@ mod tests {
             topic_for_emit(&Emit::Uncertain(U {
                 text: String::new(),
                 confidence: 0.1,
+                reason: None,
                 ts: 0,
             })),
             outgoing::UNCERTAIN
