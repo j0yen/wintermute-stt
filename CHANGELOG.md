@@ -30,14 +30,21 @@ and whisper-rs build fix (PRD-wintermute-stt-whisper-model AC1/AC5/AC6/AC7/AC9).
   tests. Model bytes excluded via `.gitignore`. Covers AC8.
 - **`install.sh --download-model`**: new flag downloads model from HuggingFace
   (`ggerganov/whisper.cpp`). Apache 2.0 licensed. Covers AC3/AC8.
-- **`deny.toml`**: documented whisper-rs transitive advisory exceptions; currently
-  none are needed (no active advisories). Covers AC7.
+- **`deny.toml`**: documented whisper-rs transitive advisory + license
+  exceptions. `whisper-rs` 0.13.2 and `whisper-rs-sys` 0.11.1 publish under
+  the `Unlicense` (public-domain-equivalent, OSI-approved permissive), which
+  is now in the `[licenses] allow` list. `cargo deny --all-features check
+  bans licenses sources` is clean. Covers AC7.
 
-### deny.toml whisper-rs advisory exceptions
+### deny.toml whisper-rs advisory + license exceptions
 
-No active advisories for whisper-rs 0.13 transitive deps as of 2026-06-02.
-If `cargo deny check` reports `RUSTSEC-*` for whisper-rs-sys or ggml, add the
-advisory ID to `deny.toml [advisories] ignore` with a rationale comment.
+- License: `Unlicense` added to `[licenses] allow` for `whisper-rs`
+  0.13.2 / `whisper-rs-sys` 0.11.1 (only pulled under the opt-in
+  `whisper` feature).
+- Advisories: no active advisories for whisper-rs 0.13 transitive deps as of
+  2026-06-03. If `cargo deny check` reports `RUSTSEC-*` for whisper-rs-sys or
+  ggml, add the advisory ID to `deny.toml [advisories] ignore` with a
+  rationale comment.
 
 ## v0.2.0 — 2026-05-30
 

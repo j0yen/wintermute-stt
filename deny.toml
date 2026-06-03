@@ -29,6 +29,10 @@ allow = [
   "Zlib",
   "MPL-2.0",
   "CDLA-Permissive-2.0",
+  # whisper-rs 0.13.2 and whisper-rs-sys 0.11.1 are published under the
+  # Unlicense (public-domain-equivalent, OSI-approved permissive). Only
+  # pulled in under the opt-in `whisper` feature. Documented per AC7.
+  "Unlicense",
 ]
 confidence-threshold = 0.8
 
