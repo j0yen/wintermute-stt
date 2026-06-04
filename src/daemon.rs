@@ -282,10 +282,15 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
         )
         .await?;
     sub_client.subscribe(bus::AUDIO_TOPIC_PREFIX).await?;
-    sub_client.subscribe(bus::STT_COMMAND_PREFIX).await?;
+    // Subscribe ONLY to the specific inbound control topic, NOT the whole
+    // `wm.stt.` prefix — that prefix also matches our OWN outbound topics
+    // (wm.stt.error/final/partial/...), so subscribing to it echoes our own
+    // publishes back; wm.stt.error then fails decode and we re-publish
+    // wm.stt.error → an infinite feedback loop that floods the bus.
+    sub_client.subscribe(bus::incoming::RELOAD_MODEL).await?;
     info!(
         audio_prefix = bus::AUDIO_TOPIC_PREFIX,
-        stt_prefix = bus::STT_COMMAND_PREFIX,
+        control_topic = bus::incoming::RELOAD_MODEL,
         "wm-stt: subscribed"
     );
 
@@ -373,6 +378,13 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
                     error!(topic = %ev.topic, err = %err, "wm-stt: dispatch failed");
                     let _ = publish_error(&mut sink, "bus", &format!("dispatch: {err}")).await;
                 }
+            }
+            // Unknown topics: ignore silently. Do NOT publish an error — if the
+            // unknown topic is one of our own outbound topics (an echo), emitting
+            // wm.stt.error here would feed right back into the loop. Only real
+            // payload-shape failures on inbound topics warrant an error.
+            Err(bus::DecodeError::UnknownTopic(t)) => {
+                tracing::debug!(topic = %t, "wm-stt: ignoring unknown topic");
             }
             Err(err) => {
                 warn!(topic = %ev.topic, err = %err, "wm-stt: decode failed");
