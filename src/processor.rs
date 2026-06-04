@@ -191,15 +191,27 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
             }));
             return out;
         }
-        // Window validation: skip inference for invalid window lengths
-        // (< 200 ms is likely a false-positive; > 30 s is a stuck detector).
-        if !(MIN_WINDOW_MS..=MAX_WINDOW_MS).contains(&duration_ms) {
+        // Window validation: skip inference for invalid window lengths.
+        // A < 200 ms window is a VAD false-positive (wake-word tail, click,
+        // brief noise) — drop it SILENTLY. Emitting Uncertain here makes
+        // wm-dialog ask "could you repeat that?" and derails the real command
+        // that follows the blip. A > 30 s window is a stuck detector worth
+        // surfacing, so that case still emits Uncertain.
+        if duration_ms < MIN_WINDOW_MS {
+            self.engine.reset();
+            self.state = State::Idle;
+            if let Some(pending) = self.pending_reload.take() {
+                out.extend(self.apply_reload(&pending, now_ms));
+            }
+            return out;
+        }
+        if duration_ms > MAX_WINDOW_MS {
             self.engine.reset();
             self.state = State::Idle;
             out.push(Emit::Uncertain(UncertainEvent {
                 text: String::new(),
                 confidence: 0.0,
-                reason: Some("window_invalid".to_string()),
+                reason: Some("window_too_long".to_string()),
                 ts: end_ts,
             }));
             if let Some(pending) = self.pending_reload.take() {
