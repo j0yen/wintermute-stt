@@ -468,6 +468,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 5000,
                 ts: 5000,
+                turn_id: None,
             }),
             5000,
         )
@@ -569,6 +570,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 500,
                 ts: 500,
+                turn_id: None,
             }),
             500,
         )
@@ -589,6 +591,7 @@ mod tests {
             topic_for_emit(&Emit::Partial(P {
                 text: String::new(),
                 ts: 0,
+                turn_id: None,
             })),
             outgoing::PARTIAL
         );
@@ -599,6 +602,7 @@ mod tests {
                 duration_ms: 0,
                 model: String::new(),
                 ts: 0,
+                turn_id: None,
             })),
             outgoing::FINAL
         );
@@ -608,6 +612,7 @@ mod tests {
                 confidence: 0.1,
                 reason: None,
                 ts: 0,
+                turn_id: None,
             })),
             outgoing::UNCERTAIN
         );
@@ -647,5 +652,75 @@ mod tests {
         };
         let err = build_stub_processor(cfg).expect_err("unknown model rejected");
         assert!(format!("{err:#}").contains("tiny.en"));
+    }
+
+    // ---- AC3 (wm-stt): inbound turn_id propagates to outbound events ----
+
+    #[tokio::test]
+    async fn dispatch_final_carries_inbound_turn_id() {
+        // AC3: speech.end with turn_id → wm.stt.final has same turn_id.
+        let state = fresh_state();
+        let mut sink = MemSink::default();
+        let tid = "0123456789abc-0001".to_string();
+        dispatch(
+            &state,
+            &mut sink,
+            Request::SpeechStart(SpeechStartEvent { ts: 0 }),
+            0,
+        )
+        .await
+        .unwrap();
+        dispatch(
+            &state,
+            &mut sink,
+            Request::SpeechEnd(SpeechEndEvent {
+                duration_ms: 3000,
+                ts: 3000,
+                turn_id: Some(tid.clone()),
+            }),
+            3000,
+        )
+        .await
+        .unwrap();
+        let events = sink.events.lock().unwrap();
+        let (topic, payload) = &events[0];
+        assert_eq!(topic, outgoing::FINAL, "must route to wm.stt.final");
+        assert_eq!(
+            payload["turn_id"], tid,
+            "AC3: out turn_id must equal in turn_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_final_no_turn_id_when_absent() {
+        // AC5: speech.end without turn_id → wm.stt.final has no turn_id field.
+        let state = fresh_state();
+        let mut sink = MemSink::default();
+        dispatch(
+            &state,
+            &mut sink,
+            Request::SpeechStart(SpeechStartEvent { ts: 0 }),
+            0,
+        )
+        .await
+        .unwrap();
+        dispatch(
+            &state,
+            &mut sink,
+            Request::SpeechEnd(SpeechEndEvent {
+                duration_ms: 3000,
+                ts: 3000,
+                turn_id: None,
+            }),
+            3000,
+        )
+        .await
+        .unwrap();
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events[0].0, outgoing::FINAL);
+        assert!(
+            events[0].1.get("turn_id").is_none(),
+            "AC5: absent inbound turn_id must not appear in output"
+        );
     }
 }

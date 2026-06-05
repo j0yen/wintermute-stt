@@ -81,6 +81,10 @@ pub struct SpeechEndEvent {
     pub duration_ms: u32,
     /// Unix milliseconds when speech ended.
     pub ts: u64,
+    /// Turn identifier minted by `wm-audio` at wake time.
+    /// Absent on legacy events (backward compat).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// `wm.stt.reload_model` payload.
@@ -98,6 +102,10 @@ pub struct PartialEvent {
     pub text: String,
     /// Unix milliseconds at emission.
     pub ts: u64,
+    /// Turn identifier copied from the triggering `speech.end` event.
+    /// Absent when no inbound id was present (backward compat).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// Outbound `wm.stt.final` payload.
@@ -114,6 +122,10 @@ pub struct FinalEvent {
     pub model: String,
     /// Unix milliseconds at emission.
     pub ts: u64,
+    /// Turn identifier copied from the triggering `speech.end` event.
+    /// Absent when no inbound id was present (backward compat).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// Outbound `wm.stt.uncertain` payload (below confidence threshold or invalid
@@ -131,6 +143,10 @@ pub struct UncertainEvent {
     pub reason: Option<String>,
     /// Unix milliseconds at emission.
     pub ts: u64,
+    /// Turn identifier copied from the triggering `speech.end` event.
+    /// Absent when no inbound id was present (backward compat).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// Outbound `wm.stt.error` payload.
@@ -283,6 +299,7 @@ mod tests {
             duration_ms: 4321,
             model: "distil-small.en".to_string(),
             ts: 17,
+            turn_id: None,
         };
         let v = serde_json::to_value(&f).expect("serialises");
         let back: FinalEvent = serde_json::from_value(v).expect("round-trips");
@@ -291,6 +308,23 @@ mod tests {
         assert_eq!(back.duration_ms, 4321);
         assert_eq!(back.model, "distil-small.en");
         assert_eq!(back.ts, 17);
+        assert!(back.turn_id.is_none());
+    }
+
+    #[test]
+    fn outbound_final_with_turn_id_roundtrip() {
+        let f = FinalEvent {
+            text: "turn test".to_string(),
+            confidence: 0.95,
+            duration_ms: 1000,
+            model: "distil-small.en".to_string(),
+            ts: 42,
+            turn_id: Some("0000000000001-0000".to_string()),
+        };
+        let v = serde_json::to_value(&f).expect("serialises");
+        assert_eq!(v["turn_id"], "0000000000001-0000", "turn_id present in JSON");
+        let back: FinalEvent = serde_json::from_value(v).expect("round-trips");
+        assert_eq!(back.turn_id.as_deref(), Some("0000000000001-0000"));
     }
 
     #[test]
@@ -300,12 +334,36 @@ mod tests {
             confidence: 0.2,
             reason: None,
             ts: 5,
+            turn_id: None,
         };
         let v = serde_json::to_value(&u).expect("serialises");
         let back: UncertainEvent = serde_json::from_value(v).expect("round-trips");
         assert_eq!(back.text, "mumble");
         assert_eq!(back.confidence, 0.2);
         assert_eq!(back.ts, 5);
+        assert!(back.turn_id.is_none());
+    }
+
+    #[test]
+    fn speech_end_legacy_no_turn_id_deserializes() {
+        // AC5: a pre-PRD speech.end payload (no turn_id field) must still decode.
+        let v = serde_json::json!({ "duration_ms": 3000_u32, "ts": 1_234_u64 });
+        let e: SpeechEndEvent = serde_json::from_value(v).expect("legacy payload decodes");
+        assert!(e.turn_id.is_none(), "absent turn_id maps to None");
+        assert_eq!(e.duration_ms, 3000);
+    }
+
+    #[test]
+    fn speech_end_with_turn_id_roundtrip() {
+        let e = SpeechEndEvent {
+            duration_ms: 2500,
+            ts: 999,
+            turn_id: Some("deadbeef-cafe".to_string()),
+        };
+        let v = serde_json::to_value(&e).expect("serialises");
+        assert_eq!(v["turn_id"], "deadbeef-cafe");
+        let back: SpeechEndEvent = serde_json::from_value(v).expect("round-trips");
+        assert_eq!(back.turn_id.as_deref(), Some("deadbeef-cafe"));
     }
 
     #[test]

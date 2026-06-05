@@ -59,6 +59,9 @@ enum State {
     Speaking {
         start_ts: u64,
         last_partial_ts: u64,
+        /// Turn identifier received from the triggering `speech.start` or
+        /// `speech.end` event. `None` when upstream hasn't adopted turn-id yet.
+        turn_id: Option<String>,
     },
 }
 
@@ -120,7 +123,10 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
         match req {
             Request::SpeechStart(s) => self.on_speech_start(s.ts, now_ms),
             Request::SpeechChunk(c) => self.on_speech_chunk(c.seq, &c.pcm_b64, c.ts),
-            Request::SpeechEnd(e) => self.on_speech_end(e.duration_ms, e.ts, now_ms),
+            Request::SpeechEnd(e) => {
+                let turn_id = e.turn_id;
+                self.on_speech_end(e.duration_ms, e.ts, now_ms, turn_id)
+            }
             Request::ReloadModel(r) => self.on_reload_model(&r.model, now_ms),
         }
     }
@@ -139,6 +145,8 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
         self.state = State::Speaking {
             start_ts,
             last_partial_ts: start_ts,
+            // turn_id is not yet known at speech.start; it arrives on speech.end.
+            turn_id: None,
         };
         out
     }
@@ -148,6 +156,7 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
         let State::Speaking {
             start_ts: _,
             last_partial_ts,
+            ..
         } = self.state
         else {
             out.push(Emit::Error(ErrorEvent {
@@ -165,9 +174,16 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
 
         if chunk_ts.saturating_sub(last_partial_ts) >= self.partial_cadence_ms {
             if let Some(text) = self.engine.current_partial_fast() {
+                // Borrow current turn_id (if any) from state for partial events.
+                let partial_turn_id = if let State::Speaking { ref turn_id, .. } = self.state {
+                    turn_id.clone()
+                } else {
+                    None
+                };
                 out.push(Emit::Partial(PartialEvent {
                     text,
                     ts: chunk_ts,
+                    turn_id: partial_turn_id,
                 }));
             }
             if let State::Speaking {
@@ -181,7 +197,13 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
         out
     }
 
-    fn on_speech_end(&mut self, duration_ms: u32, end_ts: u64, now_ms: u64) -> Vec<Emit> {
+    fn on_speech_end(
+        &mut self,
+        duration_ms: u32,
+        end_ts: u64,
+        now_ms: u64,
+        turn_id: Option<String>,
+    ) -> Vec<Emit> {
         let mut out = Vec::new();
         if !matches!(self.state, State::Speaking { .. }) {
             out.push(Emit::Error(ErrorEvent {
@@ -213,6 +235,7 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
                 confidence: 0.0,
                 reason: Some("window_too_long".to_string()),
                 ts: end_ts,
+                turn_id,
             }));
             if let Some(pending) = self.pending_reload.take() {
                 out.extend(self.apply_reload(&pending, now_ms));
@@ -229,6 +252,7 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
                         duration_ms,
                         model,
                         ts: end_ts,
+                        turn_id,
                     }));
                 } else {
                     out.push(Emit::Uncertain(UncertainEvent {
@@ -236,6 +260,7 @@ impl<E: TranscriptionEngine> UtteranceProcessor<E> {
                         confidence: f.confidence,
                         reason: None,
                         ts: end_ts,
+                        turn_id,
                     }));
                 }
             }
@@ -347,6 +372,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 5000,
                 ts: 5100,
+                turn_id: None,
             }),
             5100,
         );
@@ -370,6 +396,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 1000,
                 ts: 1000,
+                turn_id: None,
             }),
             1000,
         );
@@ -450,6 +477,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 1,
                 ts: 1,
+                turn_id: None,
             }),
             1,
         );
@@ -542,6 +570,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 1000,
                 ts: 1000,
+                turn_id: None,
             }),
             1000,
         );
@@ -583,6 +612,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: MIN_WINDOW_MS,
                 ts: u64::from(MIN_WINDOW_MS),
+                turn_id: None,
             }),
             u64::from(MIN_WINDOW_MS),
         );
@@ -674,6 +704,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: 0,
                 ts: 0,
+                turn_id: None,
             }),
             0,
         );
@@ -697,6 +728,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: MIN_WINDOW_MS - 1,
                 ts: 199,
+                turn_id: None,
             }),
             199,
         );
@@ -718,6 +750,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: MAX_WINDOW_MS + 1,
                 ts: u64::from(MAX_WINDOW_MS) + 1,
+                turn_id: None,
             }),
             u64::from(MAX_WINDOW_MS) + 1,
         );
@@ -739,6 +772,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: MIN_WINDOW_MS,
                 ts: u64::from(MIN_WINDOW_MS),
+                turn_id: None,
             }),
             u64::from(MIN_WINDOW_MS),
         );
@@ -765,6 +799,7 @@ mod tests {
             Request::SpeechEnd(SpeechEndEvent {
                 duration_ms: MIN_WINDOW_MS,
                 ts: u64::from(MIN_WINDOW_MS),
+                turn_id: None,
             }),
             u64::from(MIN_WINDOW_MS),
         );
