@@ -698,6 +698,10 @@ mod tests {
     /// `reason = "window_invalid"` and must not crash.
     #[test]
     fn empty_window_emits_uncertain_window_invalid() {
+        // Zero-length windows are sub-MIN_WINDOW_MS VAD false-positives.
+        // They are dropped SILENTLY (no emit) — see commit 7c96324: emitting
+        // Uncertain(window_invalid) caused wm-dialog to ask "could you repeat
+        // that?" and derail the real command that followed a 32ms blip.
         let mut p = make(0.45, 0.9);
         p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
         let r = p.handle(
@@ -708,20 +712,15 @@ mod tests {
             }),
             0,
         );
-        assert_eq!(r.len(), 1, "exactly one emit for zero-length window");
-        match &r[0] {
-            Emit::Uncertain(u) => {
-                assert_eq!(u.reason.as_deref(), Some("window_invalid"));
-                assert_eq!(u.confidence, 0.0);
-            }
-            other => panic!("expected window_invalid Uncertain, got {other:?}"),
-        }
-        assert!(p.is_idle(), "processor returns to idle after window_invalid");
+        assert_eq!(r.len(), 0, "zero-length window must be dropped silently");
+        assert!(p.is_idle(), "processor returns to idle after silent drop");
     }
 
-    /// Window just below MIN_WINDOW_MS threshold must be rejected.
+    /// Window just below MIN_WINDOW_MS threshold must be dropped silently.
     #[test]
     fn window_below_min_emits_uncertain_window_invalid() {
+        // Sub-MIN_WINDOW_MS windows are VAD false-positives; they are dropped
+        // silently to avoid wm-dialog repair prompts derailing the real command.
         let mut p = make(0.45, 0.9);
         p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
         let r = p.handle(
@@ -732,18 +731,16 @@ mod tests {
             }),
             199,
         );
-        assert_eq!(r.len(), 1);
-        match &r[0] {
-            Emit::Uncertain(u) => {
-                assert_eq!(u.reason.as_deref(), Some("window_invalid"));
-            }
-            other => panic!("expected window_invalid, got {other:?}"),
-        }
+        assert_eq!(r.len(), 0, "sub-MIN window must be dropped silently (no emit)");
+        assert!(p.is_idle(), "processor returns to idle after silent drop");
     }
 
-    /// Window just above MAX_WINDOW_MS threshold must be rejected.
+    /// Window just above MAX_WINDOW_MS threshold must emit Uncertain(window_too_long).
     #[test]
     fn window_above_max_emits_uncertain_window_invalid() {
+        // Stuck-detector windows (> MAX_WINDOW_MS) are surfaced as
+        // Uncertain(window_too_long) — this is a real anomaly worth reporting,
+        // unlike sub-MIN VAD blips which are silently dropped.
         let mut p = make(0.45, 0.9);
         p.handle(Request::SpeechStart(SpeechStartEvent { ts: 0 }), 0);
         let r = p.handle(
@@ -757,9 +754,13 @@ mod tests {
         assert_eq!(r.len(), 1);
         match &r[0] {
             Emit::Uncertain(u) => {
-                assert_eq!(u.reason.as_deref(), Some("window_invalid"));
+                assert_eq!(
+                    u.reason.as_deref(),
+                    Some("window_too_long"),
+                    "stuck detector emits window_too_long, not window_invalid"
+                );
             }
-            other => panic!("expected window_invalid, got {other:?}"),
+            other => panic!("expected window_too_long Uncertain, got {other:?}"),
         }
     }
 
