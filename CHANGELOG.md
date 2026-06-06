@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.4.0 — 2026-06-05
+
+Turn-id propagation (PRD lucid-turn-id, AC3/AC5 — wm-stt leg). `wm-stt` now
+copies the cross-daemon `turn_id` minted at wake by `wm-audio` from the inbound
+`wm.audio.speech.end` onto every event it emits for that turn, so a consumer can
+reconstruct the turn by id instead of guessing on wall-clock timestamps.
+
+### Changes
+
+- **Inbound `turn_id`** (`bus.rs`): `SpeechEndEvent` gains an optional
+  `turn_id: Option<String>`; the field is skipped when absent so pre-PRD
+  envelopes still deserialize unchanged (AC5).
+- **Outbound propagation** (`bus.rs`, `processor.rs`, `daemon.rs`): `FinalEvent`,
+  `UncertainEvent`, and `PartialEvent` each carry the inbound `turn_id`.
+  `UtteranceProcessor` threads it through `State::Speaking` so `on_speech_end`
+  copies it onto `Final`/`Uncertain` and `on_speech_chunk` onto `Partial`.
+- **Tests**: `dispatch_final_carries_inbound_turn_id` (AC3: in-id == out-id),
+  `dispatch_final_no_turn_id_when_absent` and
+  `speech_end_legacy_no_turn_id_deserializes` (AC5: legacy/absent stays absent),
+  plus roundtrip coverage for the new fields.
+
 ## v0.3.0 — 2026-06-02
 
 Window validation, ModelMissing error kind, WM_STT_CONFIDENCE env var,
