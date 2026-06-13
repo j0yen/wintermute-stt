@@ -1,5 +1,9 @@
 # Changelog
 
+## vv0.5.0 — 2026-06-13
+
+Wire wm-stt ClaimGuard: hold agorabus://daemon/wm-stt for process lifetime; release on SIGTERM before exit. Enables rollout warm-swap claim detection.
+
 ## v0.4.0 — 2026-06-05
 
 Turn-id propagation (PRD lucid-turn-id, AC3/AC5 — wm-stt leg). `wm-stt` now
