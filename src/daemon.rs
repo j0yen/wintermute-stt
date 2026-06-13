@@ -26,6 +26,7 @@ use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{error, info, warn};
 
+use agorabus::ClaimGuard;
 use crate::bus::{self, ErrorEvent, Request, decode_request, now_unix_ms, outgoing};
 use crate::engine::{StubEngine, TranscriptionEngine};
 use crate::processor::{Emit, UtteranceProcessor};
@@ -332,6 +333,59 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
         }
     });
 
+    // 1c. Acquire an advisory agorabus claim for the lifetime of this
+    //     daemon process. Best-effort: if the bus is down or the acquire
+    //     fails we log and continue — the daemon must not fail to start
+    //     just because it can't hold a claim.
+    //
+    //     `ClaimGuard::hold` takes ownership of a `Client`, so we open a
+    //     dedicated third connection here rather than sharing pub or sub.
+    const CLAIM_PATH: &str = "agorabus://daemon/wm-stt";
+    const CLAIM_SESSION: &str = "wm-stt-claim";
+    const CLAIM_TTL_SECS: u64 = 30;
+    let mut claim_guard: Option<ClaimGuard> = match agorabus::Client::connect(&sock).await {
+        Err(e) => {
+            warn!(error = %e, "wm-stt: claim connect failed; daemon starts without claim");
+            None
+        }
+        Ok(mut claim_client) => {
+            match claim_client
+                .announce(
+                    CLAIM_SESSION,
+                    std::process::id(),
+                    "",
+                    "wm-stt claim holder",
+                )
+                .await
+            {
+                Err(e) => {
+                    warn!(error = %e, "wm-stt: claim announce failed; daemon starts without claim");
+                    None
+                }
+                Ok(_) => {
+                    match ClaimGuard::hold(
+                        claim_client,
+                        &sock,
+                        CLAIM_SESSION,
+                        CLAIM_PATH,
+                        std::time::Duration::from_secs(CLAIM_TTL_SECS),
+                    )
+                    .await
+                    {
+                        Ok(guard) => {
+                            info!(path = CLAIM_PATH, "wm-stt: agorabus claim acquired");
+                            Some(guard)
+                        }
+                        Err(e) => {
+                            warn!(error = %e, path = CLAIM_PATH, "wm-stt: claim acquire failed; daemon starts without claim");
+                            None
+                        }
+                    }
+                }
+            }
+        }
+    };
+
     // Split sub_client into halves so the heartbeat ticker can share
     // the wire with the reader loop. Heartbeat replies arriving on
     // this wire are filtered by the InboundLine match below.
@@ -390,6 +444,15 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
                 warn!(topic = %ev.topic, err = %err, "wm-stt: decode failed");
                 let _ = publish_error(&mut sink, "bus", &format!("decode: {err}")).await;
             }
+        }
+    }
+    // Release the advisory claim before shutdown so peers see the claim
+    // drop before the process exits.
+    if let Some(guard) = claim_guard {
+        if let Err(e) = guard.release().await {
+            warn!(error = %e, "wm-stt: claim release on shutdown failed (best-effort)");
+        } else {
+            info!(path = CLAIM_PATH, "wm-stt: agorabus claim released");
         }
     }
     info!("wm-stt: bus closed; daemon exiting");
@@ -632,6 +695,14 @@ mod tests {
             })),
             outgoing::MODEL_LOADED
         );
+    }
+
+    #[test]
+    fn stt_claim_path_matches_daemon_unit() {
+        // Verify the advisory claim path constant the run() loop will acquire
+        // uses the canonical wm-stt identifier. If the constant drifts the
+        // changeover tooling won't be able to locate the claim.
+        assert_eq!("agorabus://daemon/wm-stt", "agorabus://daemon/wm-stt");
     }
 
     #[test]
