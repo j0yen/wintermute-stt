@@ -343,7 +343,7 @@ pub async fn run(cfg: SttConfig) -> Result<()> {
     const CLAIM_PATH: &str = "agorabus://daemon/wm-stt";
     const CLAIM_SESSION: &str = "wm-stt-claim";
     const CLAIM_TTL_SECS: u64 = 30;
-    let mut claim_guard: Option<ClaimGuard> = match agorabus::Client::connect(&sock).await {
+    let claim_guard: Option<ClaimGuard> = match agorabus::Client::connect(&sock).await {
         Err(e) => {
             warn!(error = %e, "wm-stt: claim connect failed; daemon starts without claim");
             None

@@ -33,13 +33,19 @@
     clippy::missing_errors_doc
 )]
 
+#[cfg(not(feature = "whisper"))]
 use std::path::PathBuf;
+#[cfg(not(feature = "whisper"))]
 use std::time::Duration;
 
+#[cfg(not(feature = "whisper"))]
 use agorabus::{Client, DaemonConfig, run_daemon};
+#[cfg(not(feature = "whisper"))]
 use tokio::time::timeout;
+#[cfg(not(feature = "whisper"))]
 use wintermute_stt::SttConfig;
 
+#[cfg(not(feature = "whisper"))]
 fn tmp_path(tag: &str, ext: &str) -> PathBuf {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
@@ -53,6 +59,7 @@ fn tmp_path(tag: &str, ext: &str) -> PathBuf {
     dir.join(format!("{tag}.{ext}"))
 }
 
+#[cfg(not(feature = "whisper"))]
 async fn run_bus_smoke() -> Result<(), String> {
     // 1. Spawn an in-process agorabus on a unique temp socket.
     let bus_sock = tmp_path("bus", "sock");
@@ -235,6 +242,13 @@ async fn run_bus_smoke() -> Result<(), String> {
     Ok(())
 }
 
+/// This test drives the daemon via the stub engine path and does not require a
+/// whisper model on disk. When compiled with `--features whisper` the
+/// production `daemon::run()` selects `WhisperEngine`, which fails without a
+/// real model. Gate with `#[cfg(not(feature = "whisper"))]` so the test only
+/// runs on stub builds; a model-present integration test lives in the
+/// `real-hardware` feature group.
+#[cfg(not(feature = "whisper"))]
 #[test]
 fn wm_stt_bus_smoke_announces_before_subscribe() {
     let rt = tokio::runtime::Builder::new_multi_thread()
