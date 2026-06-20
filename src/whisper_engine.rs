@@ -152,6 +152,29 @@ fn open_context(path: &Path) -> Result<WhisperContext, EngineError> {
         .map_err(|e| EngineError::Internal(format!("whisper load {path_str}: {e}")))
 }
 
+/// Minimum number of `f32` samples required by whisper.cpp per utterance
+/// (1000 ms × 16 kHz). Buffers shorter than this are zero-padded in
+/// [`pad_to_min`] before inference so short commands ("yes", "stop",
+/// "story") are not silently rejected.
+pub const WHISPER_MIN_SAMPLES: usize = 16_000;
+
+/// Zero-pad `samples` to at least [`WHISPER_MIN_SAMPLES`] so that
+/// whisper.cpp never rejects an utterance with "input is too short".
+///
+/// - Inputs already at or above `WHISPER_MIN_SAMPLES` are returned unchanged.
+/// - Silence padding does not degrade transcription quality — whisper is
+///   trained on padded 30-second windows.
+///
+/// Extracted as a standalone `pub` function so it can be unit-tested
+/// without a real model binary (AC2).
+#[must_use]
+pub fn pad_to_min(mut samples: Vec<f32>) -> Vec<f32> {
+    if samples.len() < WHISPER_MIN_SAMPLES {
+        samples.resize(WHISPER_MIN_SAMPLES, 0.0_f32);
+    }
+    samples
+}
+
 /// Decode a base64-encoded little-endian i16 PCM chunk into the f32
 /// samples whisper.cpp expects. Pure function; exposed for unit-test
 /// reach.
@@ -211,12 +234,23 @@ impl TranscriptionEngine for WhisperEngine {
     }
 
     fn finalise(&mut self, _duration_ms: u32) -> Result<EngineFinal, EngineError> {
-        let samples = std::mem::take(&mut self.buffer);
-        if samples.is_empty() {
+        let raw = std::mem::take(&mut self.buffer);
+        if raw.is_empty() {
             return Ok(EngineFinal {
                 text: String::new(),
                 confidence: 0.0,
             });
+        }
+        let original_samples = raw.len();
+        let samples = pad_to_min(raw);
+        if samples.len() > original_samples {
+            let padded_ms = samples.len() / 16; // 16 000 samples = 1000 ms
+            tracing::debug!(
+                original_samples,
+                padded_samples = samples.len(),
+                padded_ms,
+                "audio buffer zero-padded to whisper minimum"
+            );
         }
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(num_threads());
@@ -496,5 +530,48 @@ mod tests {
         // A dummy engine can't be made without a valid path, so we just
         // confirm the method exists and has the right type.
         let _: fn(&WhisperEngine) -> bool = WhisperEngine::state_allocated;
+    }
+
+    // ── AC2 — pad_to_min unit tests (no model needed) ───────────────────────
+
+    /// Short buffer (8000 samples, 500 ms) is padded to exactly WHISPER_MIN_SAMPLES.
+    #[test]
+    fn pad_to_min_extends_short_buffer() {
+        let input: Vec<f32> = vec![0.5_f32; 8_000];
+        let out = pad_to_min(input);
+        assert_eq!(out.len(), WHISPER_MIN_SAMPLES);
+        // Original samples preserved at the front.
+        assert!((out[0] - 0.5).abs() < 1e-6);
+        assert!((out[7_999] - 0.5).abs() < 1e-6);
+        // Padding is zero-filled.
+        for &s in &out[8_000..] {
+            assert!((s - 0.0_f32).abs() < 1e-9, "padding must be 0.0, got {s}");
+        }
+    }
+
+    /// Buffer exactly at the minimum is returned unchanged (no-op).
+    #[test]
+    fn pad_to_min_exact_minimum_noop() {
+        let input: Vec<f32> = vec![1.0_f32; WHISPER_MIN_SAMPLES];
+        let out = pad_to_min(input);
+        assert_eq!(out.len(), WHISPER_MIN_SAMPLES);
+        // All samples preserved, no zeroes appended.
+        assert!(out.iter().all(|&s| (s - 1.0_f32).abs() < 1e-6));
+    }
+
+    /// Buffer longer than the minimum is returned unchanged (no truncation).
+    #[test]
+    fn pad_to_min_longer_buffer_unchanged() {
+        let input: Vec<f32> = vec![0.3_f32; 20_000];
+        let out = pad_to_min(input);
+        assert_eq!(out.len(), 20_000);
+    }
+
+    /// Empty buffer is padded to WHISPER_MIN_SAMPLES of silence.
+    #[test]
+    fn pad_to_min_empty_input() {
+        let out = pad_to_min(Vec::new());
+        assert_eq!(out.len(), WHISPER_MIN_SAMPLES);
+        assert!(out.iter().all(|&s| s == 0.0_f32));
     }
 }
