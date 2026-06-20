@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.0 — 2026-06-20
+
+Persist `WhisperState` across voice turns so the ~97 MB whisper decode buffer is allocated once at daemon start, not once per utterance. Eliminates ~500 ms setup overhead per turn on `small.en`.
+
+- `WhisperEngine` now holds `state: Mutex<Option<WhisperState>>` allocated in `load()`
+- `finalise()` reuses the persisted state; `reload_model()` swaps both ctx and state
+- New `state_allocated() -> bool` diagnostic helper
+- Bump rust-version 1.85 → 1.88 (agorabus 0.12 dependency); correct Cargo.toml constraint
+- Fix `bus_smoke.rs` to gate stub-engine test behind `#[cfg(not(feature = "whisper"))]`
+
 ## vv0.5.0 — 2026-06-13
 
 Wire wm-stt ClaimGuard: hold agorabus://daemon/wm-stt for process lifetime; release on SIGTERM before exit. Enables rollout warm-swap claim detection.
